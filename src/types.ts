@@ -55,7 +55,7 @@ export interface Peer {
   id: string;
   publicKey: string;
   hostName: string;
-  dNSName: string;
+  dnsName: string;
   os: string;
   userID: number;
   tailscaleIPs: string[];

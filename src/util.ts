@@ -103,7 +103,6 @@ export const toCamelCase = (
           }${word.slice(1)}`,
       )
       .join("");
-
 export const toCamelCaseKeys = <T>(data: T): T => {
   if (Array.isArray(data)) {
     return data.map(item => toCamelCaseKeys(item)) as T;
@@ -113,7 +112,10 @@ export const toCamelCaseKeys = <T>(data: T): T => {
     const result: Record<string, any> = {};
     
     for (const [key, value] of Object.entries(data)) {
-      const camelKey = toCamelCase(key);
+      const camelKey = key.replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+                          .replace(/([a-z\d])([A-Z])/g, '$1_$2')
+                          .toLowerCase()
+                          .replace(/_([a-z])/g, (_, char) => char.toUpperCase());
       result[camelKey] = toCamelCaseKeys(value);
     }
     

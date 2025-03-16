@@ -1,5 +1,5 @@
 import * as fs from "fs"
-import { BlockList } from "net"
+import { BlockList, isIPv4, isIPv6 } from "net"
 import { exit } from "process"
 import { Agent, BodyInit, fetch, HeadersInit, Response } from "undici"
 import { FileTargetResponse, StatusResponse, StatusWithPeers, WaitingFile, WhoIsResponse } from "./types.js"
@@ -476,11 +476,11 @@ export class TailscaleLocalApi {
   /**
    * Sends a Taildrop file to a target device.
    * 
-   * @param targetNodeId The stable node ID of the target device
+   * @param targetName The name of the target device
    * @param filePath Path to the file to send
    * @returns Promise that resolves when the file has been sent
    */
-  async pushFile(targetNodeId: string, filePath: string): Promise<void>;
+  async pushFile(targetName: string, filePath: string): Promise<void>;
 
   /**
    * Sends a Taildrop file to a target device.
@@ -489,7 +489,7 @@ export class TailscaleLocalApi {
    * @returns Promise that resolves when the file has been sent
    */
   async pushFile(options: {
-    targetNodeId: string;
+    targetName: string;
     size: number;
     name: string;
     data: ArrayBuffer | ReadableStream<Uint8Array>;
@@ -499,17 +499,17 @@ export class TailscaleLocalApi {
    * Implementation of pushFile that handles both overloads
    */
   async pushFile(
-    targetNodeIdOrOptions: string | {
-      targetNodeId: string;
+    targetNameOrOptions: string | {
+      targetName: string;
       size: number;
       name: string;
       data: ArrayBuffer | ReadableStream<Uint8Array>;
     },
     maybeFilePath?: string
-  ): Promise<void> {
+  ) {
     // Handle the file path overload
-    if (typeof targetNodeIdOrOptions === 'string' && maybeFilePath) {
-      const targetNodeId = targetNodeIdOrOptions;
+    if (typeof targetNameOrOptions === 'string' && maybeFilePath) {
+      const targetName = targetNameOrOptions;
       const filePath = maybeFilePath;
       
       // Get file stats to determine size
@@ -524,22 +524,34 @@ export class TailscaleLocalApi {
       
       // Call the implementation with the extracted details
       return this.pushFile({
-        targetNodeId,
+        targetName,
         size,
         name,
         data,
       });
     }
     
-    // Rest of the implementation remains the same
-    const options = targetNodeIdOrOptions as {
-      targetNodeId: string;
+    // Handle the options object case
+    const options = targetNameOrOptions as {
+      targetName: string;
       size: number;
       name: string;
       data: ArrayBuffer | ReadableStream<Uint8Array>;
     };
     
-    const { targetNodeId, size, name, data } = options;
+    const { targetName, size, name, data } = options;
+    
+    // Get the list of file targets to find the node ID
+    const targets = await this.fileTargets();
+    
+    // Find the target with the matching name
+    const target = targets.find(({node}) => node.computedName === targetName || node.name === targetName || node.stableID === targetName);
+    
+    if (!target) {
+      throw new Error(`No device found with name: ${targetName}`);
+    }
+    
+    const targetNodeId = target.node.stableID;
     const encodedName = encodeURIComponent(name);
     const url = `/localapi/v0/file-put/${targetNodeId}/${encodedName}`;
     
@@ -547,7 +559,7 @@ export class TailscaleLocalApi {
     if (size !== -1) {
       headers['Content-Length'] = size.toString();
     }
-    console.log("got fucked here?")
+    
     const resp = await this.fetch(url, {
       method: 'PUT',
       headers,
@@ -559,7 +571,7 @@ export class TailscaleLocalApi {
       throw new Error(`Failed to push file: ${resp.status} ${errorText}`);
     }
     // Drain the response body to ensure the request is complete
-    await resp.arrayBuffer();
+    return resp.statusText
   }
 
   /**
@@ -618,4 +630,94 @@ export class TailscaleLocalApi {
       throw new Error(`Failed to start interactive login: ${errorText}`);
     }
   }
+
+  /**
+   * Pings a Tailscale node with the specified IP address.
+   * 
+   * @param ip The IP address of the node to ping
+   * @param pingType PingDisco PingType = "disco"
+	// PingTSMP performs a ping, using the IP layer, but avoiding the OS IP stack.
+	PingTSMP PingType = "TSMP"
+	// PingICMP performs a ping between two tailscale nodes using ICMP that is
+	// received by the target systems IP stack.
+	PingICMP PingType = "ICMP"
+	// PingPeerAPI performs a ping between two tailscale nodes using ICMP that is
+	// received by the target systems IP stack.
+	PingPeerAPI PingType = "peerapi"
+   * @returns Promise resolving to the ping result
+   */
+  async ping(ip: string, pingType: "disco" | "TSMP" | "ICMP" | "peerapi" = 'peerapi'): Promise<any> {
+    return this.pingWithOpts(ip, pingType, {});
+  }
+
+  /**
+   * Pings a Tailscale node with the specified IP address and options.
+   * 
+   * @param target The name or IP address of the node to ping
+   * @param pingType The type of ping to perform
+   * @param options Additional options for the ping
+   * @returns Promise resolving to the ping result
+   */
+  async pingWithOpts(target: string, pingType: string, options: {size?: number} = {}): Promise<any> {
+    let ip: string | undefined = target
+    if(!isIPv4(target) && !isIPv6(target)) {
+      const status = await this.status()
+      console.log(Object.values(status.peer))
+      const node = Object.values(status.peer).find((peer) => peer.dnsName === target || peer.hostName === target || peer.dnsName?.split(".")?.[0] === target )
+      console.log(node)
+      ip = node?.tailscaleIPs[0]
+    }
+    if(!ip) throw new Error(`No IP address found for ${target}`)
+
+    const url = `/localapi/v0/ping?ip=${encodeURIComponent(ip)}&type=${encodeURIComponent(pingType)}`;
+    
+    const resp = await this.fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(options),
+    });
+    
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      throw new Error(`Failed to ping ${ip}: ${errorText}`);
+    }
+    
+    const data = await resp.json();
+    return toCamelCaseKeys(data);
+  }
+
+  // WatchIPNBus subscribes to the IPN notification bus. It returns a watcher
+// once the bus is connected successfully.
+//
+// The context is used for the life of the watch, not just the call to
+// WatchIPNBus.
+//
+// The returned IPNBusWatcher's Close method must be called when done to release
+// resources.
+//
+// A default set of ipn.Notify messages are returned but the set can be modified by mask.
+// func (lc *Client) WatchIPNBus(ctx context.Context, mask ipn.NotifyWatchOpt) (*IPNBusWatcher, error) {
+// 	req, err := http.NewRequestWithContext(ctx, "GET",
+// 		"http://"+apitype.LocalAPIHost+"/localapi/v0/watch-ipn-bus?mask="+fmt.Sprint(mask),
+// 		nil)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	res, err := lc.doLocalRequestNiceError(req)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	if res.StatusCode != 200 {
+// 		res.Body.Close()
+// 		return nil, errors.New(res.Status)
+// 	}
+// 	dec := json.NewDecoder(res.Body)
+// 	return &IPNBusWatcher{
+// 		ctx:     ctx,
+// 		httpRes: res,
+// 		dec:     dec,
+// 	}, nil
+// }
 }
